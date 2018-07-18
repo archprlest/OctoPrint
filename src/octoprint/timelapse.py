@@ -737,9 +737,9 @@ class TimedTimelapse(Timelapse):
 class TimelapseRenderJob(object):
 
 	render_job_lock = threading.RLock()
-
+	#change the output_formate from mpg to mp4 
 	def __init__(self, capture_dir, output_dir, prefix, postfix=None, capture_glob="{prefix}-*.jpg",
-	             capture_format="{prefix}-%d.jpg", output_format="{prefix}{postfix}.mpg", fps=25, threads=1,
+	             capture_format="{prefix}-%d.jpg", output_format="{prefix}{postfix}.mp4", fps=25, threads=1,
 	             on_start=None, on_success=None, on_fail=None, on_always=None):
 		self._capture_dir = capture_dir
 		self._output_dir = output_dir
@@ -852,11 +852,12 @@ class TimelapseRenderJob(object):
 		### See unit tests in test/timelapse/test_timelapse_renderjob.py
 
 		logger = logging.getLogger(__name__)
+		#changing the vcodec to h264_omx to support hardware accelared encoding to mp4
+		#remove the -f vob as it is not needed with the mp4
 
 		command = [
-			ffmpeg, '-framerate', str(fps), '-loglevel', 'error', '-i', '"{}"'.format(input), '-vcodec', 'mpeg2video',
-			'-threads', str(threads), '-r', "25", '-y', '-b', str(bitrate),
-			'-f', 'vob']
+			ffmpeg, '-framerate', str(fps), '-loglevel', 'error', '-i', '"{}"'.format(input), '-vcodec', 'h264_omx',
+			'-threads', str(threads), '-r', "25", '-y', '-b', str(bitrate)]
 
 		filter_string = cls._create_filter_string(hflip=hflip,
 		                                          vflip=vflip,
