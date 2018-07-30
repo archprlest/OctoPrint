@@ -66,7 +66,7 @@ the general type of script for which to look for additions ("gcode") and the scr
 return a 2-tuple of prefix and postfix if has something for either of those, otherwise ``None``. OctoPrint will then take
 care to add prefix and suffix as necessary after a small round of preprocessing.
 
-Plugins can easily add their own hooks too. For example, the `Software Update Plugin <https://github.com/OctoPrint/OctoPrint-SoftwareUpdate>`_
+Plugins can easily add their own hooks too. For example, the `Software Update Plugin <https://github.com/foosel/OctoPrint/tree/master/src/octoprint/plugins/softwareupdate>`_
 declares a custom hook "octoprint.plugin.softwareupdate.check_config" which other plugins can add handlers for in order
 to register themselves with the Software Update Plugin by returning their own update check configuration.
 
@@ -380,6 +380,52 @@ octoprint.cli.commands
             OctoPrint's CLI.
    :rtype: list
 
+.. _sec-plugins-hook-comm-firmware-info:
+
+octoprint.comm.firmware.info
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. py:function:: firmware_info_hook(comm_instance, firmware_name, firmware_data, *args, **kwargs)
+
+   Be notified of firmware information received from the printer following an ``M115``.
+
+   Hook handlers may use this to react/adjust behaviour based on reported firmware data. OctoPrint parses the received
+   report line and provides the parsed ``firmware_name`` and additional ``firmware_data`` contained therein. A
+   response line ``FIRMWARE_NAME:Some Firmware Name FIRMWARE_VERSION:1.2.3 PROTOCOL_VERSION:1.0`` for example will
+   be turned into a ``dict`` looking like this:
+
+   .. code-block:: python
+
+      dict(FIRMWARE_NAME="Some Firmware Name",
+           FIRMWARE_VERSION="1.2.3",
+           PROTOCOL_VERSION="1.0")
+
+   ``firmware_name`` will be ``Some Firmware Name`` in this case.
+
+   :param object comm_instance: The :class:`~octoprint.util.comm.MachineCom` instance which triggered the hook.
+   :param str firmware_name: The name of the parsed capability
+   :param dict firmware_data: All data contained in the ``M115`` report
+
+.. _sec-plugins-hook-comm-firmware-capabilities:
+
+octoprint.comm.firmware.capabilities
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. py:function:: firmware_capability_hook(comm_instance, capability, enabled, already_defined, *args, **kwargs)
+
+   Be notified of capability report entries received from the printer.
+
+   Hook handlers may use this to react to custom firmware capabilities. OctoPrint parses the received capability
+   line and provides the parsed ``capability`` and whether it's ``enabled`` to the handler. Additionally all already
+   parsed capabilities will also be provided.
+
+   Note that hook handlers will be called once per received capability line.
+
+   :param object comm_instance: The :class:`~octoprint.util.comm.MachineCom` instance which triggered the hook.
+   :param str capability: The name of the parsed capability
+   :param bool enabled: Whether the capability is reported as enabled or disabled
+   :param dict already_defined: Already defined capabilities (capability name mapped to enabled flag)
+
 .. _sec-plugins-hook-comm-protocol-action:
 
 octoprint.comm.protocol.action
@@ -389,7 +435,7 @@ octoprint.comm.protocol.action
 
    React to a :ref:`action command <sec-features-action_commands>` received from the printer.
 
-   Hook handlers may use this to react to react to custom firmware messages. OctoPrint parses the received action
+   Hook handlers may use this to react to custom firmware messages. OctoPrint parses the received action
    command ``line`` and provides the parsed ``action`` (so anything after ``// action:``) to the hook handler.
 
    No returned value is expected.
@@ -801,6 +847,44 @@ octoprint.comm.transport.serial.factory
    :rtype: A serial instance implementing implementing the methods ``readline(...)``, ``write(...)``, ``close()`` and
        optionally ``baudrate`` and ``timeout`` attributes as described above.
 
+.. _sec-plugins-hook-filemanager-analysis-factory:
+
+octoprint.filemanager.analysis.factory
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. py:function:: analysis_queue_factory_hook(*args, **kwargs)
+
+   Return additional (or replacement) analysis queue factories used for analysing uploaded files.
+
+   Should return a dictionary to merge with the existing dictionary of factories, mapping from extension tree leaf
+   to analysis queue factory. Analysis queue factories are expected to be :class:`~octoprint.filemanager.analysis.AbstractAnalysisQueue`
+   subclasses or factory methods taking one argument (the finish callback to be used by the queue implementation
+   to signal that an analysis has been finished to the system). See the source of :class:`~octoprint.filemanager.analysis.GcodeAnalysisQueue`
+   for an example.
+
+   By default, only one analysis queue factory is registered in the system, for file type ``gcode``: :class:`~octoprint.filemanager.analysis.GcodeAnalysisQueue`.
+   This can be replaced by plugins using this hook, allowing other approaches to file analysis.
+
+   This is useful for plugins wishing to provide (alternative) methods of metadata analysis for printable files.
+
+   **Example:**
+
+   The following handler would replace the existing analysis queue for ``gcode`` files with a custom implementation:
+
+   .. code-block:: python
+      :linenos:
+
+      from octoprint.filemanager.analysis import AbstractAnalysisQueue
+
+      class MyCustomGcodeAnalysisQueue(AbstractAnalysisQueue):
+          # ... custom implementation here ...
+
+      def custom_gcode_analysis_queue(*args, **kwargs):
+          return dict(gcode=MyCustomGcodeAnalysisQueue)
+
+   :return: A dictionary of analysis queue factories, mapped by their targeted file type.
+   :rtype: dict
+
 .. _sec-plugins-hook-filemanager-extensiontree:
 
 octoprint.filemanager.extension_tree
@@ -902,6 +986,52 @@ octoprint.printer.factory
    :param dict components: System components to use for printer instance initialization
    :return: The ``printer`` instance to use globally.
    :rtype: PrinterInterface subclass or None
+
+.. _sec-plugins-hook-printer-estimation-factory:
+
+octoprint.printer.estimation.factory
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. py:function:: print_time_estimator_factory(*args, **kwargs)
+
+   Return a :class:`~octoprint.printer.estimation.PrintTimeEstimator` subclass (or factory) to use for print time
+   estimation. This will be called on each start of a print or streaming job with a single parameter ``job_type``
+   denoting the type of job that was just started: ``local`` meaning a print of a local file through the serial connection,
+   ``sdcard`` a print of a file stored on the printer's SD card, ``stream`` the streaming of a local file to the
+   printer's SD card.
+
+   This is useful for plugins wishing to provide alternative methods of live print time estimation.
+
+   If none of the registered factories return a ``PrintTimeEstimator`` subclass, the default :class:`~octoprint.printer.estimation.PrintTimeEstimator`
+   will be used.
+
+   **Example:**
+
+   The following example would replace the stock print time estimator with (a nonsensical) one that always estimates
+   two hours of print time left:
+
+   .. code-block:: python
+
+      from octoprint.printer.estimation import PrintTimeEstimator
+
+      class CustomPrintTimeEstimator(PrintTimeEstimator):
+          def __init__(self, job_type):
+              pass
+
+          def estimate(self, progress, printTime, cleanedPrintTime, statisticalTotalPrintTime, statisticalTotalPrintTimeType):
+              # always reports 2h as printTimeLeft
+              return 2 * 60 * 60, "estimate"
+
+      def create_estimator_factory(*args, **kwargs):
+          return CustomPrintTimeEstimator
+
+      __plugin_hooks__ = {
+      	"octoprint.printer.estimation.factory": create_estimator_factory
+      }
+
+
+   :return: The :class:`~octoprint.printer.estimation.PrintTimeEstimator` class to use, or a factory method
+   :rtype: class or function
 
 .. _sec-plugins-hook-server-http-bodysize:
 

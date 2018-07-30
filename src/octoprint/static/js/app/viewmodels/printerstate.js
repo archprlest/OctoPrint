@@ -18,7 +18,7 @@ $(function() {
         self.isSdReady = ko.observable(undefined);
 
         self.enablePrint = ko.pureComputed(function() {
-            return self.isOperational() && self.isReady() && !self.isPrinting() && !self.isCancelling() && !self.isPausing() && self.loginState.isUser() && self.filename() != undefined;
+            return self.isOperational() && self.isReady() && !self.isPrinting() && !self.isCancelling() && !self.isPausing() && self.loginState.isUser() && self.filename();
         });
         self.enablePause = ko.pureComputed(function() {
             return self.isOperational() && (self.isPrinting() || self.isPaused()) && !self.isCancelling() && !self.isPausing() && self.loginState.isUser();
@@ -38,6 +38,7 @@ $(function() {
         self.printTimeLeftOrigin = ko.observable(undefined);
         self.sd = ko.observable(undefined);
         self.timelapse = ko.observable(undefined);
+        self.user = ko.observable(undefined);
 
         self.busyFiles = ko.observableArray([]);
 
@@ -167,6 +168,20 @@ $(function() {
             }
         });
 
+        self.userString = ko.pureComputed(function() {
+            var user = self.user();
+            if (!CONFIG_ACCESS_CONTROL || user === "_dummy") {
+                return "";
+            }
+
+            if (user === "_api") {
+                user = "API client";
+            }
+
+            var file = self.filename();
+            return (user ? user : (file ? "-" : ""));
+        });
+
         self.fromCurrentData = function(data) {
             self._fromData(data);
         };
@@ -244,6 +259,8 @@ $(function() {
                 });
             }
             self.filament(result);
+
+            self.user(data.user);
         };
 
         self._processProgressData = function(data) {
@@ -307,7 +324,8 @@ $(function() {
                     proceed: gettext("Yes"),
                     onproceed: function() {
                         OctoPrint.job.cancel();
-                    }
+                    },
+                    nofade: true
                 });
             }
         };

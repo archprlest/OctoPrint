@@ -55,6 +55,9 @@
                 <label class="checkbox">
                     <input type="checkbox" data-bind="checked: renderer_showRetracts">{{ _('Show retracts') }}
                 </label>
+                <label class="checkbox">
+                    <input type="checkbox" data-bind="checked: renderer_showPrinthead">{{ _('Show approx. print head position') }}
+                </label>
             </p>
 
             <p>
@@ -83,10 +86,10 @@
                     </p>
                     <p>
                         <label class="checkbox">
-                            <input type="checkbox" data-bind="checked: reader_hideEmptyLayers">{{ _('Hide empty layers') }} <label class="label">{{ _('Causes reload') }}</label>
+                            <input type="checkbox" data-bind="checked: reader_hideEmptyLayers">{{ _('Hide empty layers') }} <span class="label">{{ _('Causes reload') }}</span>
                         </label>
                         <label class="checkbox">
-                            <input type="checkbox" data-bind="checked: reader_sortLayers">{{ _('Sort layers') }} <label class="label">{{ _('Causes reload') }}</label>
+                            <input type="checkbox" data-bind="checked: reader_sortLayers">{{ _('Sort layers') }} <span class="label">{{ _('Causes reload') }}</span>
                         </label>
                     </p>
                     <p>

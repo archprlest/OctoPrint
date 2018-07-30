@@ -24,7 +24,7 @@ from octoprint.events import eventManager, Events
 from octoprint.filemanager import FileDestinations, NoSuchStorage, valid_file_type
 from octoprint.plugin import plugin_manager, ProgressPlugin
 from octoprint.printer import PrinterInterface, PrinterCallback, UnknownScript, InvalidFileLocation, InvalidFileType
-from octoprint.printer.estimation import TimeEstimationHelper
+from octoprint.printer.estimation import PrintTimeEstimator
 from octoprint.settings import settings
 from octoprint.util import comm as comm
 from octoprint.util import InvariantContainer
@@ -77,13 +77,21 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		self._streamingFinishedCallback = None
 		self._streamingFailedCallback = None
 
+		# job handling & estimation
 		self._selectedFileMutex = threading.RLock()
 		self._selectedFile = None
-		self._timeEstimationData = None
-		self._timeEstimationStatsWeighingUntil = settings().getFloat(["estimation", "printTime", "statsWeighingUntil"])
-		self._timeEstimationValidityRange = settings().getFloat(["estimation", "printTime", "validityRange"])
-		self._timeEstimationForceDumbFromPercent = settings().getFloat(["estimation", "printTime", "forceDumbFromPercent"])
-		self._timeEstimationForceDumbAfterMin = settings().getFloat(["estimation", "printTime", "forceDumbAfterMin"])
+
+		self._estimator_factory = PrintTimeEstimator
+		self._estimator = None
+		analysis_queue_hooks = plugin_manager().get_hooks("octoprint.printer.estimation.factory")
+		for name, hook in analysis_queue_hooks.items():
+			try:
+				estimator = hook()
+				if estimator is not None:
+					self._logger.info("Using print time estimator provided by {}".format(name))
+					self._estimator_factory = estimator
+			except:
+				self._logger.exception("Error while processing analysis queues from {}".format(name))
 
 		# comm
 		self._comm = None
@@ -113,7 +121,8 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 			                    estimatedPrintTime=None,
 			                    lastPrintTime=None,
 			                    filament=self._dict(length=None,
-			                                        volume=None)),
+			                                        volume=None),
+			                    user=None),
 			progress=self._dict(completion=None,
 			                    filepos=None,
 			                    printTime=None,
@@ -125,6 +134,19 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 
 		eventManager().subscribe(Events.METADATA_ANALYSIS_FINISHED, self._on_event_MetadataAnalysisFinished)
 		eventManager().subscribe(Events.METADATA_STATISTICS_UPDATED, self._on_event_MetadataStatisticsUpdated)
+
+	def _create_estimator(self, job_type=None):
+		if job_type is None:
+			with self._selectedFileMutex:
+				if self._selectedFile is None:
+					return
+
+				if self._selectedFile["sd"]:
+					job_type = "sdcard"
+				else:
+					job_type = "local"
+
+		self._estimator = self._estimator_factory(job_type)
 
 	#~~ handling of PrinterCallbacks
 
@@ -174,14 +196,16 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 			if self._selectedFile:
 				self._setJobData(self._selectedFile["filename"],
 								 self._selectedFile["filesize"],
-								 self._selectedFile["sd"])
+								 self._selectedFile["sd"],
+								 self._selectedFile["user"])
 
 	def _on_event_MetadataStatisticsUpdated(self, event, data):
 		with self._selectedFileMutex:
 			if self._selectedFile:
 				self._setJobData(self._selectedFile["filename"],
 				                 self._selectedFile["filesize"],
-				                 self._selectedFile["sd"])
+				                 self._selectedFile["sd"],
+				                 self._selectedFile["user"])
 
 	#~~ progress plugin reporting
 
@@ -272,7 +296,7 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		for command in commands:
 			self._comm.sendCommand(command, tags=kwargs.get("tags", set()) | {"trigger:printer.commands"})
 
-	def script(self, name, context=None, must_be_set=True, *args, **kwargs):
+	def script(self, name, context=None, must_be_set=True, part_of_job=False, *args, **kwargs):
 		if self._comm is None:
 			return
 
@@ -280,6 +304,7 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 			raise ValueError("name must be set")
 
 		result = self._comm.sendGcodeScript(name,
+		                                    part_of_job=part_of_job,
 		                                    replacements=context,
 		                                    tags=kwargs.get("tags", set()) | {"trigger:printer.script"})
 		if not result and must_be_set:
@@ -418,26 +443,34 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		self.commands("M221 S%d" % factor,
 		              tags=kwargs.get("tags", set()) | {"trigger:printer.flow_rate"})
 
-	def select_file(self, path, sd, printAfterSelect=False, pos=None, *args, **kwargs):
+	def select_file(self, path, sd, printAfterSelect=False, user=None, pos=None, *args, **kwargs):
 		if self._comm is None or (self._comm.isBusy() or self._comm.isStreaming()):
 			self._logger.info("Cannot load file: printer not connected or currently busy")
 			return
 
 		self._validateJob(path, sd)
 
+		origin = FileDestinations.SDCARD if sd else FileDestinations.LOCAL
+		if sd:
+			path_on_disk = "/" + path
+			path_in_storage = path
+		else:
+			path_on_disk = self._fileManager.path_on_disk(origin, path)
+			path_in_storage = self._fileManager.path_in_storage(origin, path_on_disk)
+
 		recovery_data = self._fileManager.get_recovery_data()
 		if recovery_data:
 			# clean up recovery data if we just selected a different file than is logged in that
-			expected_origin = FileDestinations.SDCARD if sd else FileDestinations.LOCAL
 			actual_origin = recovery_data.get("origin", None)
 			actual_path = recovery_data.get("path", None)
 
-			if actual_origin is None or actual_path is None or actual_origin != expected_origin or actual_path != path:
+			if actual_origin is None or actual_path is None or actual_origin != origin or actual_path != path_in_storage:
 				self._fileManager.delete_recovery_data()
 
 		self._printAfterSelect = printAfterSelect
 		self._posAfterSelect = pos
-		self._comm.selectFile("/" + path if sd else path, sd,
+		self._comm.selectFile("/" + path if sd else path_on_disk, sd,
+		                      user=user,
 		                      tags=kwargs.get("tags", set()) | {"trigger:printer.select_file"})
 		self._updateProgressData()
 		self._setCurrentZ(None)
@@ -460,33 +493,17 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 
 		return self._comm.getFilePosition()
 
-	def start_print(self, pos=None, *args, **kwargs):
+	def start_print(self, pos=None, user=None, *args, **kwargs):
 		"""
 		 Starts the currently loaded print job.
 		 Only starts if the printer is connected and operational, not currently printing and a printjob is loaded
 		"""
 		if self._comm is None or not self._comm.isOperational() or self._comm.isPrinting():
 			return
+
 		with self._selectedFileMutex:
 			if self._selectedFile is None:
 				return
-
-		# we are happy if the average of the estimates stays within 60s of the prior one
-		threshold = settings().getFloat(["estimation", "printTime", "stableThreshold"])
-		rolling_window = None
-		countdown = None
-
-		with self._selectedFileMutex:
-			if self._selectedFile["sd"]:
-				# we are interesting in a rolling window of roughly the last 15s, so the number of entries has to be derived
-				# by that divided by the sd status polling interval
-				rolling_window = 15 / settings().get(["serial", "timeout", "sdStatus"])
-
-				# we are happy when one rolling window has been stable
-				countdown = rolling_window
-		self._timeEstimationData = TimeEstimationHelper(rolling_window=rolling_window,
-		                                                threshold=threshold,
-		                                                countdown=countdown)
 
 		self._fileManager.delete_recovery_data()
 
@@ -608,6 +625,12 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 	def is_paused(self, *args, **kwargs):
 		return self._comm is not None and self._comm.isPaused()
 
+	def is_resuming(self, *args, **kwargs):
+		return self._comm is not None and self._comm.isResuming()
+
+	def is_finishing(self, *args, **kwargs):
+		return self._comm is not None and self._comm.isFinishing()
+
 	def is_error(self, *args, **kwargs):
 		return self._comm is not None and self._comm.isError()
 
@@ -646,7 +669,7 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		else:
 			# probably something else added through a plugin, use it's basename as-is
 			remoteName = os.path.basename(filename)
-		self._timeEstimationData = TimeEstimationHelper()
+		self._create_estimator("stream")
 		self._comm.startFileTransfer(absolutePath, filename, "/" + remoteName,
 		                             special=not valid_file_type(filename, "gcode"),
 		                             tags=kwargs.get("tags", set()) | {"trigger:printer.add_sd_file"})
@@ -711,20 +734,6 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		self._messages.append(message)
 		self._stateMonitor.add_message(message)
 
-	def _estimateTotalPrintTime(self, progress, printTime):
-		if not progress or not printTime or not self._timeEstimationData:
-			return None
-
-		else:
-			newEstimate = printTime / progress
-			self._timeEstimationData.update(newEstimate)
-
-			result = None
-			if self._timeEstimationData.is_stable():
-				result = self._timeEstimationData.average_total_rolling
-
-			return result
-
 	def _updateProgressData(self, completion=None, filepos=None, printTime=None, printTimeLeft=None, printTimeLeftOrigin=None):
 		self._stateMonitor.set_progress(self._dict(completion=int(completion * 100) if completion is not None else None,
 		                                           filepos=filepos,
@@ -744,143 +753,40 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 			printTime = self._comm.getPrintTime()
 			cleanedPrintTime = self._comm.getCleanedPrintTime()
 
-		statisticalTotalPrintTime = None
-		statisticalTotalPrintTimeType = None
-		with self._selectedFileMutex:
-			if self._selectedFile and "estimatedPrintTime" in self._selectedFile \
-					and self._selectedFile["estimatedPrintTime"]:
-				statisticalTotalPrintTime = self._selectedFile["estimatedPrintTime"]
-				statisticalTotalPrintTimeType = self._selectedFile.get("estimatedPrintTimeType", None)
-
-		printTimeLeft, printTimeLeftOrigin = self._estimatePrintTimeLeft(progress, printTime, cleanedPrintTime, statisticalTotalPrintTime, statisticalTotalPrintTimeType)
-
+		printTimeLeft = printTimeLeftOrigin = None
+		estimator = self._estimator
 		if progress is not None:
 			progress_int = int(progress * 100)
 			if self._lastProgressReport != progress_int:
 				self._lastProgressReport = progress_int
 				self._reportPrintProgressToPlugins(progress_int)
 
+			if progress == 0:
+				printTimeLeft = None
+				printTimeLeftOrigin = None
+			elif progress == 1.0:
+				printTimeLeft = 0
+				printTimeLeftOrigin = None
+			elif estimator is not None:
+				statisticalTotalPrintTime = None
+				statisticalTotalPrintTimeType = None
+				with self._selectedFileMutex:
+					if self._selectedFile and "estimatedPrintTime" in self._selectedFile \
+							and self._selectedFile["estimatedPrintTime"]:
+						statisticalTotalPrintTime = self._selectedFile["estimatedPrintTime"]
+						statisticalTotalPrintTimeType = self._selectedFile.get("estimatedPrintTimeType", None)
+
+				printTimeLeft, printTimeLeftOrigin = estimator.estimate(progress,
+				                                                        printTime,
+				                                                        cleanedPrintTime,
+				                                                        statisticalTotalPrintTime,
+				                                                        statisticalTotalPrintTimeType)
+
 		return self._dict(completion=progress * 100 if progress is not None else None,
 		                  filepos=filepos,
 		                  printTime=int(printTime) if printTime is not None else None,
 		                  printTimeLeft=int(printTimeLeft) if printTimeLeft is not None else None,
 		                  printTimeLeftOrigin=printTimeLeftOrigin)
-
-	def _estimatePrintTimeLeft(self, progress, printTime, cleanedPrintTime, statisticalTotalPrintTime, statisticalTotalPrintTimeType):
-		"""
-		Tries to estimate the print time left for the print job
-
-		This is somewhat horrible since accurate print time estimation is pretty much impossible to
-		achieve, considering that we basically have only two data points (current progress in file and
-		time needed for that so far - former prints or a file analysis might not have happened or simply
-		be completely impossible e.g. if the file is stored on the printer's SD card) and
-		hence can only do a linear estimation of a completely non-linear process. That's a recipe
-		for inaccurate predictions right there. Yay.
-
-		Anyhow, here's how this implementation works. This method gets the current progress in the
-		printed file (percentage based on bytes read vs total bytes), the print time that elapsed,
-		the same print time with the heat up times subtracted (if possible) and if available also
-		some statistical total print time (former prints or a result from the GCODE analysis).
-
-		  1. First get an "intelligent" estimate based on the :class:`~octoprint.printer.estimation.TimeEstimationHelper`.
-		     That thing tries to detect if the estimation based on our progress and time needed for that becomes
-		     stable over time through a rolling window and only returns a result once that appears to be the
-		     case.
-		  2. If we have any statistical data (former prints or a result from the GCODE analysis)
-		     but no intelligent estimate yet, we'll use that for the next step. Otherwise, up to a certain percentage
-		     in the print we do a percentage based weighing of the statistical data and the intelligent
-		     estimate - the closer to the beginning of the print, the more precedence for the statistical
-		     data, the closer to the cut off point, the more precendence for the intelligent estimate. This
-		     is our preliminary total print time.
-		  3. If the total print time is set, we do a sanity check for it. Based on the total print time
-		     estimate and the time we already spent printing, we calculate at what percentage we SHOULD be
-		     and compare that to the percentage at which we actually ARE. If it's too far off, our total
-		     can't be trusted and we fall back on the dumb estimate. Same if the time we spent printing is
-		     already higher than our total estimate.
-		  4. If we do NOT have a total print time estimate yet but we've been printing for longer than
-		     a configured amount of minutes or are further in the file than a configured percentage, we
-		     also use the dumb estimate for now.
-
-		Yes, all this still produces horribly inaccurate results. But we have to do this live during the print and
-		hence can't produce to much computational overhead, we do not have any insight into the firmware implementation
-		with regards to planner setup and acceleration settings, we might not even have access to the printed file's
-		contents and such we need to find something that works "mostly" all of the time without costing too many
-		resources. Feel free to propose a better solution within the above limitations (and I mean that, this solution
-		here makes me unhappy).
-
-		Args:
-		    progress (float or None): Current percentage in the printed file
-		    printTime (float or None): Print time elapsed so far
-		    cleanedPrintTime (float or None): Print time elapsed minus the time needed for getting up to temperature
-		        (if detectable).
-		    statisticalTotalPrintTime (float or None): Total print time of past prints against same printer profile,
-		        or estimated total print time from GCODE analysis.
-		    statisticalTotalPrintTimeType (str or None): Type of statistical print time, either "average" (total time
-		        of former prints) or "analysis"
-
-		Returns:
-		    (2-tuple) estimated print time left or None if not proper estimate could be made at all, origin of estimation
-		"""
-
-		if progress is None or progress == 0 or printTime is None or cleanedPrintTime is None:
-			return None, None
-
-		dumbTotalPrintTime = printTime / progress
-		estimatedTotalPrintTime = self._estimateTotalPrintTime(progress, cleanedPrintTime)
-		totalPrintTime = estimatedTotalPrintTime
-
-		printTimeLeftOrigin = "estimate"
-		if statisticalTotalPrintTime is not None:
-			if estimatedTotalPrintTime is None:
-				# no estimate yet, we'll use the statistical total
-				totalPrintTime = statisticalTotalPrintTime
-				printTimeLeftOrigin = statisticalTotalPrintTimeType
-
-			else:
-				if progress < self._timeEstimationStatsWeighingUntil:
-					# still inside weighing range, use part stats, part current estimate
-					sub_progress = progress * (1 / self._timeEstimationStatsWeighingUntil)
-					if sub_progress > 1.0:
-						sub_progress = 1.0
-					printTimeLeftOrigin = "mixed-" + statisticalTotalPrintTimeType
-				else:
-					# use only the current estimate
-					sub_progress = 1.0
-					printTimeLeftOrigin = "estimate"
-
-				# combine
-				totalPrintTime = (1.0 - sub_progress) * statisticalTotalPrintTime \
-				                 + sub_progress * estimatedTotalPrintTime
-
-		printTimeLeft = None
-		if totalPrintTime is not None:
-			# sanity check current total print time estimate
-			assumed_progress = cleanedPrintTime / totalPrintTime
-			min_progress = progress - self._timeEstimationValidityRange
-			max_progress = progress + self._timeEstimationValidityRange
-
-			if min_progress <= assumed_progress <= max_progress and totalPrintTime > cleanedPrintTime:
-				# appears sane, we'll use it
-				printTimeLeft = totalPrintTime - cleanedPrintTime
-
-			else:
-				# too far from the actual progress or negative,
-				# we use the dumb print time instead
-				printTimeLeft = dumbTotalPrintTime - cleanedPrintTime
-				printTimeLeftOrigin = "linear"
-
-		else:
-			printTimeLeftOrigin = "linear"
-			if progress > self._timeEstimationForceDumbFromPercent or \
-					cleanedPrintTime >= self._timeEstimationForceDumbAfterMin * 60:
-				# more than x% or y min printed and still no real estimate, ok, we'll use the dumb variant :/
-				printTimeLeft = dumbTotalPrintTime - cleanedPrintTime
-
-		if printTimeLeft is not None and printTimeLeft < 0:
-			# shouldn't actually happen, but let's make sure
-			printTimeLeft = None
-
-		return printTimeLeft, printTimeLeftOrigin
 
 	def _addTemperatureData(self, tools=None, bed=None):
 		if tools is None:
@@ -912,7 +818,7 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		if not os.path.isfile(path_on_disk):
 			raise InvalidFileLocation("{} does not exist in local storage, cannot select for printing".format(filename))
 
-	def _setJobData(self, filename, filesize, sd):
+	def _setJobData(self, filename, filesize, sd, user=None):
 		with self._selectedFileMutex:
 			if filename is not None:
 				if sd:
@@ -929,7 +835,8 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 					"filename": path_in_storage,
 					"filesize": filesize,
 					"sd": sd,
-					"estimatedPrintTime": None
+					"estimatedPrintTime": None,
+					"user": user
 				}
 			else:
 				self._selectedFile = None
@@ -942,7 +849,8 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 				                                           estimatedPrintTime=None,
 				                                           averagePrintTime=None,
 				                                           lastPrintTime=None,
-				                                           filament=None))
+				                                           filament=None,
+				                                           user=None))
 				return
 
 			estimatedPrintTime = None
@@ -993,7 +901,8 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 			                                           estimatedPrintTime=estimatedPrintTime,
 			                                           averagePrintTime=averagePrintTime,
 			                                           lastPrintTime=lastPrintTime,
-			                                           filament=filament))
+			                                           filament=filament,
+			                                           user=user))
 
 	def _sendInitialStateUpdate(self, callback):
 		try:
@@ -1012,6 +921,8 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		                  printing=self.is_printing(),
 		                  cancelling=self.is_cancelling(),
 		                  pausing=self.is_pausing(),
+		                  resuming=self.is_resuming(),
+		                  finishing=self.is_finishing(),
 		                  closedOrError=self.is_closed_or_error(),
 		                  error=self.is_error(),
 		                  paused=self.is_paused(),
@@ -1044,28 +955,29 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		if self._comm is not None:
 			state_string = self._comm.getStateString()
 
-		# forward relevant state changes to gcode manager
-		if oldState == comm.MachineCom.STATE_PRINTING:
-			with self._selectedFileMutex:
-				if self._selectedFile is not None:
-					if state == comm.MachineCom.STATE_CLOSED or state == comm.MachineCom.STATE_ERROR or state == comm.MachineCom.STATE_CLOSED_WITH_ERROR:
-						payload = self._payload_for_print_job_event()
-						if payload:
-							payload["time"] = self._comm.getPrintTime()
+		if oldState in (comm.MachineCom.STATE_PRINTING,):
+			# if we were still printing and went into an error state, mark the print as failed
+			if state in (comm.MachineCom.STATE_CLOSED, comm.MachineCom.STATE_ERROR, comm.MachineCom.STATE_CLOSED_WITH_ERROR):
+				with self._selectedFileMutex:
+					if self._selectedFile is not None:
+							payload = self._payload_for_print_job_event()
+							if payload:
+								payload["time"] = self._comm.getPrintTime()
 
-							def finalize():
-								self._fileManager.log_print(payload["origin"],
-								                            payload["path"],
-								                            time.time(),
-								                            payload["time"],
-								                            False,
-								                            self._printerProfileManager.get_current_or_default()["id"])
-								eventManager().fire(Events.PRINT_FAILED, payload)
+								def finalize():
+									self._fileManager.log_print(payload["origin"],
+									                            payload["path"],
+									                            time.time(),
+									                            payload["time"],
+									                            False,
+									                            self._printerProfileManager.get_current_or_default()["id"])
+									eventManager().fire(Events.PRINT_FAILED, payload)
 
-							thread = threading.Thread(target=finalize)
-							thread.daemon = True
-							thread.start()
+								thread = threading.Thread(target=finalize)
+								thread.daemon = True
+								thread.start()
 			self._analysisQueue.resume() # printing done, put those cpu cycles to good use
+
 		elif state == comm.MachineCom.STATE_PRINTING:
 			self._analysisQueue.pause() # do not analyse files while printing
 
@@ -1117,7 +1029,7 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		eventManager().fire(Events.UPDATED_FILES, {"type": "gcode"})
 		self._sdFilelistAvailable.set()
 
-	def on_comm_file_selected(self, full_path, size, sd):
+	def on_comm_file_selected(self, full_path, size, sd, user=None):
 		if full_path is not None:
 			payload = self._payload_for_print_job_event(location=FileDestinations.SDCARD if sd else FileDestinations.LOCAL,
 			                                            print_job_file=full_path)
@@ -1125,22 +1037,27 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 		else:
 			eventManager().fire(Events.FILE_DESELECTED)
 
-		self._setJobData(full_path, size, sd)
+		self._setJobData(full_path, size, sd, user=user)
 		self._stateMonitor.set_state(self._dict(text=self.get_state_string(), flags=self._getStateFlags()))
+
+		self._create_estimator()
 
 		if self._printAfterSelect:
 			self._printAfterSelect = False
-			self.start_print(pos=self._posAfterSelect)
+			self.start_print(pos=self._posAfterSelect, user=user)
 
-	def on_comm_print_job_started(self):
+	def on_comm_print_job_started(self, suppress_script=False):
+		self._stateMonitor.trigger_progress_update()
 		payload = self._payload_for_print_job_event()
 		if payload:
 			eventManager().fire(Events.PRINT_STARTED, payload)
-			self.script("beforePrintStarted",
-			            context=dict(event=payload),
-			            must_be_set=False)
+			if not suppress_script:
+				self.script("beforePrintStarted",
+				            context=dict(event=payload),
+				            part_of_job=True,
+				            must_be_set=False)
 
-	def on_comm_print_job_done(self):
+	def on_comm_print_job_done(self, suppress_script=False):
 		self._fileManager.delete_recovery_data()
 
 		payload = self._payload_for_print_job_event()
@@ -1153,9 +1070,11 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 			self._stateMonitor.set_state(self._dict(text=self.get_state_string(), flags=self._getStateFlags()))
 
 			eventManager().fire(Events.PRINT_DONE, payload)
-			self.script("afterPrintDone",
-			            context=dict(event=payload),
-			            must_be_set=False)
+			if not suppress_script:
+				self.script("afterPrintDone",
+				            context=dict(event=payload),
+				            part_of_job=True,
+				            must_be_set=False)
 
 			def log_print():
 				self._fileManager.log_print(payload["origin"],
@@ -1186,7 +1105,7 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 				payload["firmwareError"] = firmware_error
 			eventManager().fire(Events.PRINT_CANCELLING, payload)
 
-	def on_comm_print_job_cancelled(self):
+	def on_comm_print_job_cancelled(self, suppress_script=False):
 		self._setCurrentZ(None)
 		self._updateProgressData()
 
@@ -1195,9 +1114,11 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 			payload["time"] = self._comm.getPrintTime()
 
 			eventManager().fire(Events.PRINT_CANCELLED, payload)
-			self.script("afterPrintCancelled",
-			            context=dict(event=payload),
-			            must_be_set=False)
+			if not suppress_script:
+				self.script("afterPrintCancelled",
+				            context=dict(event=payload),
+				            part_of_job=True,
+				            must_be_set=False)
 
 			def finalize():
 				self._fileManager.log_print(payload["origin"],
@@ -1212,26 +1133,30 @@ class Printer(PrinterInterface, comm.MachineComPrintCallback):
 			thread.daemon = True
 			thread.start()
 
-	def on_comm_print_job_paused(self):
+	def on_comm_print_job_paused(self, suppress_script=False):
 		payload = self._payload_for_print_job_event(position=self._comm.pause_position.as_dict() if self._comm and self._comm.pause_position else None)
 		if payload:
 			eventManager().fire(Events.PRINT_PAUSED, payload)
-			self.script("afterPrintPaused",
-			            context=dict(event=payload),
-			            must_be_set=False)
+			if not suppress_script:
+				self.script("afterPrintPaused",
+				            context=dict(event=payload),
+				            part_of_job=True,
+				            must_be_set=False)
 
-	def on_comm_print_job_resumed(self):
+	def on_comm_print_job_resumed(self, suppress_script=False):
 		payload = self._payload_for_print_job_event()
 		if payload:
 			eventManager().fire(Events.PRINT_RESUMED, payload)
-			self.script("beforePrintResumed",
-			            context=dict(event=payload),
-			            must_be_set=False)
+			if not suppress_script:
+				self.script("beforePrintResumed",
+				            context=dict(event=payload),
+				            part_of_job=True,
+				            must_be_set=False)
 
-	def on_comm_file_transfer_started(self, filename, filesize):
+	def on_comm_file_transfer_started(self, filename, filesize, user=None):
 		self._sdStreaming = True
 
-		self._setJobData(filename, filesize, True)
+		self._setJobData(filename, filesize, True, user=user)
 		self._updateProgressData(completion=0.0, filepos=0, printTime=0)
 		self._stateMonitor.set_state(self._dict(text=self.get_state_string(), flags=self._getStateFlags()))
 
@@ -1389,20 +1314,23 @@ class StateMonitor(object):
 		self._change_event.set()
 
 	def _work(self):
-		while True:
-			self._change_event.wait()
+		try:
+			while True:
+				self._change_event.wait()
 
-			now = time.time()
-			delta = now - self._last_update
-			additional_wait_time = self._interval - delta
-			if additional_wait_time > 0:
-				time.sleep(additional_wait_time)
+				now = time.time()
+				delta = now - self._last_update
+				additional_wait_time = self._interval - delta
+				if additional_wait_time > 0:
+					time.sleep(additional_wait_time)
 
-			with self._state_lock:
-				data = self.get_current_data()
-				self._update_callback(data)
-				self._last_update = time.time()
-				self._change_event.clear()
+				with self._state_lock:
+					data = self.get_current_data()
+					self._update_callback(data)
+					self._last_update = time.time()
+					self._change_event.clear()
+		except:
+			logging.getLogger(__name__).exception("Looks like something crashed inside the state update worker. Please report this on the OctoPrint issue tracker (make sure to include logs!)")
 
 	def get_current_data(self):
 		with self._progress_lock:

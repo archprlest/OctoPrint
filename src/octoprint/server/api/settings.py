@@ -14,7 +14,7 @@ from werkzeug.exceptions import BadRequest
 from octoprint.events import eventManager, Events
 from octoprint.settings import settings, valid_boolean_trues
 
-from octoprint.server import admin_permission, printer
+from octoprint.server import admin_permission, printer, pluginManager
 from octoprint.server.api import api, NO_CONTENT
 from octoprint.server.util.flask import restricted_access, with_revalidation_checking
 
@@ -122,8 +122,7 @@ def getSettings():
 			"modelSizeDetection": s.getBoolean(["feature", "modelSizeDetection"]),
 			"printCancelConfirmation": s.getBoolean(["feature", "printCancelConfirmation"]),
 			"g90InfluencesExtruder": s.getBoolean(["feature", "g90InfluencesExtruder"]),
-			"autoUppercaseBlacklist": s.get(["feature", "autoUppercaseBlacklist"]),
-			"legacyPluginAssets": s.getBoolean(["feature", "legacyPluginAssets"])
+			"autoUppercaseBlacklist": s.get(["feature", "autoUppercaseBlacklist"])
 		},
 		"serial": {
 			"port": connectionOptions["portPreference"],
@@ -140,6 +139,8 @@ def getSettings():
 			"timeoutTemperatureAutoreport": s.getFloat(["serial", "timeout", "temperatureAutoreport"]),
 			"timeoutSdStatus": s.getFloat(["serial", "timeout", "sdStatus"]),
 			"timeoutSdStatusAutoreport": s.getFloat(["serial", "timeout", "sdStatusAutoreport"]),
+			"timeoutBaudrateDetectionPause": s.getFloat(["serial", "timeout", "baudrateDetectionPause"]),
+			"timeoutPositionLogWait": s.getFloat(["serial", "timeout", "positionLogWait"]),
 			"log": s.getBoolean(["serial", "log"]),
 			"additionalPorts": s.get(["serial", "additionalPorts"]),
 			"additionalBaudrates": s.get(["serial", "additionalBaudrates"]),
@@ -149,6 +150,7 @@ def getSettings():
 			"ignoreErrorsFromFirmware": s.getBoolean(["serial", "ignoreErrorsFromFirmware"]),
 			"disconnectOnErrors": s.getBoolean(["serial", "disconnectOnErrors"]),
 			"triggerOkForM29": s.getBoolean(["serial", "triggerOkForM29"]),
+			"blockM0M1": s.getBoolean(["serial", "blockM0M1"]),
 			"logPositionOnPause": s.getBoolean(["serial", "logPositionOnPause"]),
 			"logPositionOnCancel": s.getBoolean(["serial", "logPositionOnCancel"]),
 			"supportResendsWithoutOk": s.get(["serial", "supportResendsWithoutOk"]),
@@ -289,7 +291,9 @@ def setSettings():
 		return make_response("Malformed request, need settings dictionary, "
 		                     "got a {} instead: {!r}".format(type(data).__name__, data), 400)
 
-	_saveSettings(data)
+	response = _saveSettings(data)
+	if response:
+		return response
 	return getSettings()
 
 
@@ -308,6 +312,38 @@ def deleteApiKey():
 	settings().deleteApiKey()
 	return NO_CONTENT
 
+@api.route("/settings/templates", methods=["GET"])
+@restricted_access
+@admin_permission.require(403)
+def fetchTemplateData():
+	from octoprint.server.views import fetch_template_data
+
+	refresh = request.values.get("refresh", "false") in valid_boolean_trues
+	templates, _, _ = fetch_template_data(refresh=refresh)
+
+	result = dict()
+	for tt in templates:
+		result[tt] = []
+		for key in templates[tt]["order"]:
+			entry = templates[tt]["entries"].get(key)
+			if not entry:
+				continue
+
+			if isinstance(entry, dict):
+				name = key
+			else:
+				name, entry = entry
+
+			data = dict(id=key, name=name)
+
+			if entry and "_plugin" in entry:
+				plugin = pluginManager.get_plugin_info(entry["_plugin"], require_enabled=False)
+				data["plugin_id"] = plugin.key
+				data["plugin_name"] = plugin.name
+
+			result[tt].append(data)
+
+	return jsonify(order=result)
 
 def _saveSettings(data):
 	logger = logging.getLogger(__name__)
@@ -316,6 +352,16 @@ def _saveSettings(data):
 
 	# NOTE: Remember to adjust the docs of the data model on the Settings API if anything
 	# is changed, added or removed here
+
+	if "folder" in data.keys():
+		try:
+			if "uploads" in data["folder"]: s.setBaseFolder("uploads", data["folder"]["uploads"])
+			if "timelapse" in data["folder"]: s.setBaseFolder("timelapse", data["folder"]["timelapse"])
+			if "timelapseTmp" in data["folder"]: s.setBaseFolder("timelapse_tmp", data["folder"]["timelapseTmp"])
+			if "logs" in data["folder"]: s.setBaseFolder("logs", data["folder"]["logs"])
+			if "watched" in data["folder"]: s.setBaseFolder("watched", data["folder"]["watched"])
+		except IOError:
+			return make_response("One of the configured folders is invalid", 400)
 
 	if "api" in data.keys():
 		if "enabled" in data["api"]: s.setBoolean(["api", "enabled"], data["api"]["enabled"])
@@ -357,22 +403,23 @@ def _saveSettings(data):
 		if "modelSizeDetection" in data["feature"]: s.setBoolean(["feature", "modelSizeDetection"], data["feature"]["modelSizeDetection"])
 		if "printCancelConfirmation" in data["feature"]: s.setBoolean(["feature", "printCancelConfirmation"], data["feature"]["printCancelConfirmation"])
 		if "g90InfluencesExtruder" in data["feature"]: s.setBoolean(["feature", "g90InfluencesExtruder"], data["feature"]["g90InfluencesExtruder"])
-		if "legacyPluginAssets" in data["feature"]: s.setBoolean(["feature", "legacyPluginAssets"], data["feature"]["legacyPluginAssets"])
 		if "autoUppercaseBlacklist" in data["feature"] and isinstance(data["feature"]["autoUppercaseBlacklist"], (list, tuple)): s.set(["feature", "autoUppercaseBlacklist"], data["feature"]["autoUppercaseBlacklist"])
 
 	if "serial" in data.keys():
 		if "autoconnect" in data["serial"]: s.setBoolean(["serial", "autoconnect"], data["serial"]["autoconnect"])
 		if "port" in data["serial"]: s.set(["serial", "port"], data["serial"]["port"])
 		if "baudrate" in data["serial"]: s.setInt(["serial", "baudrate"], data["serial"]["baudrate"])
-		if "timeoutConnection" in data["serial"]: s.setFloat(["serial", "timeout", "connection"], data["serial"]["timeoutConnection"])
-		if "timeoutDetection" in data["serial"]: s.setFloat(["serial", "timeout", "detection"], data["serial"]["timeoutDetection"])
-		if "timeoutCommunication" in data["serial"]: s.setFloat(["serial", "timeout", "communication"], data["serial"]["timeoutCommunication"])
-		if "timeoutCommunicationBusy" in data["serial"]: s.setFloat(["serial", "timeout", "communicationBusy"], data["serial"]["timeoutCommunicationBusy"])
-		if "timeoutTemperature" in data["serial"]: s.setFloat(["serial", "timeout", "temperature"], data["serial"]["timeoutTemperature"])
-		if "timeoutTemperatureTargetSet" in data["serial"]: s.setFloat(["serial", "timeout", "temperatureTargetSet"], data["serial"]["timeoutTemperatureTargetSet"])
-		if "timeoutTemperatureAutoreport" in data["serial"]: s.setFloat(["serial", "timeout", "temperatureAutoreport"], data["serial"]["timeoutTemperatureAutoreport"])
-		if "timeoutSdStatus" in data["serial"]: s.setFloat(["serial", "timeout", "sdStatus"], data["serial"]["timeoutSdStatus"])
-		if "timeoutSdStatusAutoreport" in data["serial"]: s.setFloat(["serial", "timeout", "sdStatusAutoreport"], data["serial"]["timeoutSdStatusAutoreport"])
+		if "timeoutConnection" in data["serial"]: s.setFloat(["serial", "timeout", "connection"], data["serial"]["timeoutConnection"], minimum=1.0)
+		if "timeoutDetection" in data["serial"]: s.setFloat(["serial", "timeout", "detection"], data["serial"]["timeoutDetection"], minimum=1.0)
+		if "timeoutCommunication" in data["serial"]: s.setFloat(["serial", "timeout", "communication"], data["serial"]["timeoutCommunication"], minimum=1.0)
+		if "timeoutCommunicationBusy" in data["serial"]: s.setFloat(["serial", "timeout", "communicationBusy"], data["serial"]["timeoutCommunicationBusy"], minimum=1.0)
+		if "timeoutTemperature" in data["serial"]: s.setFloat(["serial", "timeout", "temperature"], data["serial"]["timeoutTemperature"], minimum=1.0)
+		if "timeoutTemperatureTargetSet" in data["serial"]: s.setFloat(["serial", "timeout", "temperatureTargetSet"], data["serial"]["timeoutTemperatureTargetSet"], minimum=1.0)
+		if "timeoutTemperatureAutoreport" in data["serial"]: s.setFloat(["serial", "timeout", "temperatureAutoreport"], data["serial"]["timeoutTemperatureAutoreport"], minimum=0.0)
+		if "timeoutSdStatus" in data["serial"]: s.setFloat(["serial", "timeout", "sdStatus"], data["serial"]["timeoutSdStatus"], minimum=1.0)
+		if "timeoutSdStatusAutoreport" in data["serial"]: s.setFloat(["serial", "timeout", "sdStatusAutoreport"], data["serial"]["timeoutSdStatusAutoreport"], minimum=0.0)
+		if "timeoutBaudrateDetectionPause" in data["serial"]: s.setFloat(["serial", "timeout", "baudrateDetectionPause"], data["serial"]["timeoutBaudrateDetectionPause"], minimum=0.0)
+		if "timeoutPositionLogWait" in data["serial"]: s.setFloat(["serial", "timeout", "positionLogWait"], data["serial"]["timeoutPositionLogWait"], minimum=1.0)
 		if "additionalPorts" in data["serial"] and isinstance(data["serial"]["additionalPorts"], (list, tuple)): s.set(["serial", "additionalPorts"], data["serial"]["additionalPorts"])
 		if "additionalBaudrates" in data["serial"] and isinstance(data["serial"]["additionalBaudrates"], (list, tuple)): s.set(["serial", "additionalBaudrates"], data["serial"]["additionalBaudrates"])
 		if "longRunningCommands" in data["serial"] and isinstance(data["serial"]["longRunningCommands"], (list, tuple)): s.set(["serial", "longRunningCommands"], data["serial"]["longRunningCommands"])
@@ -381,6 +428,7 @@ def _saveSettings(data):
 		if "ignoreErrorsFromFirmware" in data["serial"]: s.setBoolean(["serial", "ignoreErrorsFromFirmware"], data["serial"]["ignoreErrorsFromFirmware"])
 		if "disconnectOnErrors" in data["serial"]: s.setBoolean(["serial", "disconnectOnErrors"], data["serial"]["disconnectOnErrors"])
 		if "triggerOkForM29" in data["serial"]: s.setBoolean(["serial", "triggerOkForM29"], data["serial"]["triggerOkForM29"])
+		if "blockM0M1" in data["serial"]: s.setBoolean(["serial", "blockM0M1"], data["serial"]["blockM0M1"])
 		if "supportResendsWithoutOk" in data["serial"]:
 			value = data["serial"]["supportResendsWithoutOk"]
 			if value in ("always", "detect", "never"):
@@ -416,15 +464,17 @@ def _saveSettings(data):
 			logging.getLogger("SERIAL").setLevel(logging.DEBUG)
 			logging.getLogger("SERIAL").debug("Enabling serial logging")
 
-	if "folder" in data.keys():
-		if "uploads" in data["folder"]: s.setBaseFolder("uploads", data["folder"]["uploads"])
-		if "timelapse" in data["folder"]: s.setBaseFolder("timelapse", data["folder"]["timelapse"])
-		if "timelapseTmp" in data["folder"]: s.setBaseFolder("timelapse_tmp", data["folder"]["timelapseTmp"])
-		if "logs" in data["folder"]: s.setBaseFolder("logs", data["folder"]["logs"])
-		if "watched" in data["folder"]: s.setBaseFolder("watched", data["folder"]["watched"])
-
 	if "temperature" in data.keys():
-		if "profiles" in data["temperature"]: s.set(["temperature", "profiles"], data["temperature"]["profiles"])
+		if "profiles" in data["temperature"]:
+			result = []
+			for profile in data["temperature"]["profiles"]:
+				try:
+					profile["bed"] = int(profile["bed"])
+					profile["extruder"] = int(profile["extruder"])
+				except ValueError:
+					pass
+				result.append(profile)
+			s.set(["temperature", "profiles"], result)
 		if "cutoff" in data["temperature"]:
 			try:
 				cutoff = int(data["temperature"]["cutoff"])

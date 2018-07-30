@@ -143,7 +143,6 @@ $(function() {
         self.feature_printCancelConfirmation = ko.observable(undefined);
         self.feature_g90InfluencesExtruder = ko.observable(undefined);
         self.feature_autoUppercaseBlacklist = ko.observable(undefined);
-        self.feature_legacyPluginAssets = ko.observable(undefined);
 
         self.serial_port = ko.observable();
         self.serial_baudrate = ko.observable();
@@ -159,6 +158,8 @@ $(function() {
         self.serial_timeoutTemperatureAutoreport = ko.observable(undefined);
         self.serial_timeoutSdStatus = ko.observable(undefined);
         self.serial_timeoutSdStatusAutoreport = ko.observable(undefined);
+        self.serial_timeoutBaudrateDetectionPause = ko.observable(undefined);
+        self.serial_timeoutPositionLogWait = ko.observable(undefined);
         self.serial_log = ko.observable(undefined);
         self.serial_additionalPorts = ko.observable(undefined);
         self.serial_additionalBaudrates = ko.observable(undefined);
@@ -167,6 +168,7 @@ $(function() {
         self.serial_helloCommand = ko.observable(undefined);
         self.serial_serialErrorBehaviour = ko.observable("cancel");
         self.serial_triggerOkForM29 = ko.observable(undefined);
+        self.serial_blockM0M1 = ko.observable(undefined);
         self.serial_waitForStart =  ko.observable(undefined);
         self.serial_sendChecksum =  ko.observable("print");
         self.serial_sdRelativePath =  ko.observable(undefined);
@@ -251,6 +253,23 @@ $(function() {
             self.server_onlineCheckBroken(false);
         };
 
+        var folderTypes = ["uploads", "timelapse", "timelapseTmp", "logs", "watched"];
+        self.testFolderConfigText = {};
+        self.testFolderConfigOk = {};
+        self.testFolderConfigBroken = {};
+        _.each(folderTypes, function(folderType) {
+            self.testFolderConfigText[folderType] = ko.observable("");
+            self.testFolderConfigOk[folderType] = ko.observable(false);
+            self.testFolderConfigBroken[folderType] = ko.observable(false);
+        });
+        self.testFolderConfigReset = function() {
+            _.each(folderTypes, function(folderType) {
+                self.testFolderConfigText[folderType]("");
+                self.testFolderConfigOk[folderType](false);
+                self.testFolderConfigBroken[folderType](false);
+            });
+        };
+
         self.observableCopies = {
             "feature_waitForStart": "serial_waitForStart",
             "feature_sendChecksum": "serial_sendChecksum",
@@ -330,23 +349,36 @@ $(function() {
                 method: "GET",
                 response: "bytes",
                 timeout: self.webcam_snapshotTimeout(),
-                validSsl: self.webcam_snapshotSslValidation()
+                validSsl: self.webcam_snapshotSslValidation(),
+                content_type_whitelist: ["image/*"]
             })
                 .done(function(response) {
                     if (!response.result) {
+                        if (response.status && response.response && response.response.content_type) {
+                            // we could contact the server, but something else was wrong, probably the mime type
+                            errorText = gettext("Could retrieve the snapshot URL, but it didn't look like an " +
+                                                "image. Got this as a content type header: <code>%(content_type)s</code>. Please " +
+                                                "double check that the URL is returning static images, not multipart data " +
+                                                "or videos.");
+                            errorText = _.sprintf(errorText, {content_type: response.response.content_type});
+                        }
+
                         showMessageDialog({
                             title: errorTitle,
-                            message: errorText
+                            message: errorText,
+                            onclose: function() {
+                                self.testWebcamSnapshotUrlBusy(false);
+                            }
                         });
                         return;
                     }
 
                     var content = response.response.content;
-                    var mimeType = "image/jpeg";
+                    var contentType = response.response.content_type
 
-                    var headers = response.response.headers;
-                    if (headers && headers["content-type"]) {
-                        mimeType = headers["content-type"].split(";")[0];
+                    var mimeType = "image/jpeg";
+                    if (contentType) {
+                        mimeType = contentType.split(";")[0];
                     }
 
                     var text = gettext("If you see your webcam snapshot picture below, the entered snapshot URL is ok.");
@@ -423,9 +455,48 @@ $(function() {
                 });
         };
 
+        self.testFolderConfigBusy = ko.observable(false);
+        self.testFolderConfig = function(folder) {
+            var observable = "folder_" + folder;
+            if (!self.hasOwnProperty(observable)) return;
+
+            if (self.testFolderConfigBusy()) return;
+            self.testFolderConfigBusy(true);
+
+            var opts = {
+                check_type: "dir",
+                check_access: "w",
+                allow_create_dir: true,
+                check_writable_dir: true
+            };
+            var path = self[observable]();
+            OctoPrint.util.testPath(path, opts)
+                .done(function(response) {
+                    if (!response.result) {
+                        if (response.broken_symlink) {
+                            self.testFolderConfigText[folder](gettext("The path is a broken symlink."));
+                        } else if (!response.exists) {
+                            self.testFolderConfigText[folder](gettext("The path does not exist and cannot be created."));
+                        } else if (!response.typeok) {
+                            self.testFolderConfigText[folder](gettext("The path is not a folder."));
+                        } else if (!response.access) {
+                            self.testFolderConfigText[folder](gettext("The path is not writable."));
+                        }
+                    } else {
+                        self.testFolderConfigText[folder](gettext("The path is valid"));
+                    }
+                    self.testFolderConfigOk[folder](response.result);
+                    self.testFolderConfigBroken[folder](!response.result);
+                })
+                .always(function() {
+                    self.testFolderConfigBusy(false);
+                });
+        };
+
         self.onSettingsHidden = function() {
             self.webcam_ffmpegPathReset();
             self.server_onlineCheckReset();
+            self.testFolderConfigReset();
         };
 
         self.isDialogActive = function() {
@@ -729,6 +800,23 @@ $(function() {
                         });
                         return result;
                     }
+                },
+                temperature: {
+                    profiles: function() {
+                        var result = [];
+                        _.each(self.temperature_profiles(), function(profile) {
+                            try {
+                                result.push({
+                                    name: profile.name,
+                                    extruder: Math.floor(_.isNumber(profile.extruder) ? profile.extruder : parseInt(profile.extruder)),
+                                    bed: Math.floor(_.isNumber(profile.bed) ? profile.bed : parseInt(profile.bed))
+                                });
+                            } catch (ex) {
+                                // ignore
+                            }
+                        });
+                        return result;
+                    }
                 }
             };
 
@@ -868,6 +956,13 @@ $(function() {
 
             firstRequest.resolve();
         };
+
+        self.cancelData = function () {
+            // revert unsaved changes
+            self.fromResponse(self.lastReceivedSettings);
+
+            self.hide();
+        }
 
         self.saveData = function (data, successCallback, setAsSending) {
             var options;

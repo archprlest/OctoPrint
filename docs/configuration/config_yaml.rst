@@ -151,7 +151,7 @@ appearance or to modify the order and presence of the various UI components:
 
          # order of settings, if settings plugins are registered gets extended internally by
          # section_plugins and all settings plugins
-         settings
+         settings:
          - section_printer
          - serial
          - printerprofiles
@@ -209,7 +209,7 @@ appearance or to modify the order and presence of the various UI components:
             tab:
             - plugin_helloworld
 
-   OctoPrint will then turn this into the order ``plugin_helloworld``, ``temperature``, ``control``, ``gcodeviewer``,
+   OctoPrint will then display the tabs in the order ``plugin_helloworld``, ``temperature``, ``control``, ``gcodeviewer``,
    ``terminal``, ``timelapse`` plus any other plugins.
 
 
@@ -454,7 +454,7 @@ the estimation of the left print time during an active job utilizes this section
 .. code-block:: yaml
 
    estimation:
-     # Parameters for the print time estmation during an ongoing print job
+     # Parameters for the print time estimation during an ongoing print job
      printTime:
        # Until which percentage to do a weighted mixture of statistical duration (analysis or
        # past prints) with the result from the calculated estimate if that's already available.
@@ -560,6 +560,7 @@ Use the following settings to enable or disable OctoPrint features:
      # Defaults to only M117.
      autoUppercaseBlacklist:
      - M117
+     - M118
 
 .. _sec-configuration-config_yaml-folder:
 
@@ -616,15 +617,16 @@ Settings pertaining to the server side GCODE analysis implementation.
 
 .. code-block:: yaml
 
-   # Maximum number of extruders to support/to sanity check for
-   maxExtruders: 10
+   gcodeAnalysis:
+     # Maximum number of extruders to support/to sanity check for
+     maxExtruders: 10
 
-   # Pause between each processed GCODE line in normal priority mode, seconds
-   throttle_normalprio: 0.01
+     # Pause between each processed GCODE line in normal priority mode, seconds
+     throttle_normalprio: 0.01
 
-   # Pause between each processed GCODE line in high priority mode (e.g. on fresh
-   # uploads), seconds
-   throttle_highprio: 0.0
+     # Pause between each processed GCODE line in high priority mode (e.g. on fresh
+     # uploads), seconds
+     throttle_highprio: 0.0
 
 .. _sec-configuration-config_yaml-gcodeviewer:
 
@@ -635,16 +637,17 @@ Settings pertaining to the built in GCODE Viewer.
 
 .. code-block:: yaml
 
-   # Whether to enable the GCODE viewer in the UI
-   enabled: true
+   gcodeViewer:
+     # Whether to enable the GCODE viewer in the UI
+     enabled: true
 
-   # Maximum size a GCODE file may have on mobile devices to automatically be loaded
-   # into the viewer, defaults to 2MB
-   mobileSizeThreshold: 2097152
+     # Maximum size a GCODE file may have on mobile devices to automatically be loaded
+     # into the viewer, defaults to 2MB
+     mobileSizeThreshold: 2097152
 
-   # Maximum size a GCODE file may have to automatically be loaded into the viewer,
-   # defaults to 20MB
-   sizeThreshold: 20971520
+     # Maximum size a GCODE file may have to automatically be loaded into the viewer,
+     # defaults to 20MB
+     sizeThreshold: 20971520
 
 .. _sec-configuration-config_yaml-plugins:
 
@@ -893,7 +896,7 @@ Use the following settings to configure the serial connection to the printer:
      supportResendsWithoutOk: false
 
      # Whether to "manually" trigger an ok for M29 (a lot of versions of this command are buggy and
-     # the responds skips on the ok)
+     # the response skips on the ok)
      triggerOkForM29: true
 
      capabilities:
@@ -934,7 +937,7 @@ Use the following settings to configure the server:
 
      # Settings if OctoPrint is running behind a reverse proxy (haproxy, nginx, apache, ...).
      # These are necessary in order to make OctoPrint generate correct external URLs so
-     # that AJAX requests and download URLs work.
+     # that AJAX requests and download URLs work, and so that client IPs are read correctly.
      reverseProxy:
 
        # The request header from which to determine the URL prefix under which OctoPrint
@@ -967,6 +970,14 @@ Use the following settings to configure the server:
        # than OctoPrint itself but can't configure said reverse proxy to send a host HTTP header
        # (X-Forwarded-Host by default, see above) with forwarded requests.
        hostFallback:
+
+       # List of trusted downstream servers for which to ignore the IP address when trying to determine
+       # the connecting client's IP address. If you have OctoPrint behind more than one reverse proxy
+       # you should add their IPs here so that they won't be interpreted as the client's IP. One reverse
+       # proxy will be handled correctly by default.
+       trustedDownstream:
+       - 192.168.1.254
+       - 192.168.23.42
 
      # Settings for file uploads to OctoPrint, such as maximum allowed file size and
      # header suffixes to use for streaming uploads. OctoPrint does some nifty things internally in
@@ -1092,7 +1103,12 @@ System
 
 Use the following settings to add custom system commands to the "System" dropdown within OctoPrint's top bar.
 
-Commands consist of a name, an action identifier, the commandline to execute and an optional confirmation message to
+Commands consist of a ``name`` shown to the user, an ``action`` identifier used by the code and the actual
+``command`` including any argument needed for its execution.
+By default OctoPrint blocks until the command has returned so that the exit code can be used to show a success
+or failure message; use the flag ``async: true`` for commands that don't return.
+
+Optionally you can add a confirmation message to
 display before actually executing the command (should be set to False if a confirmation dialog is not desired).
 
 The following example defines a command for shutting down the system under Linux. It assumes that the user under which

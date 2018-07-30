@@ -8,6 +8,7 @@ $(function() {
         self.slicing = parameters[3];
         self.printerProfiles=parameters[4];
 
+        self.filesListVisible = ko.observable(true);
         self.isErrorOrClosed = ko.observable(undefined);
         self.isOperational = ko.observable(undefined);
         self.isPrinting = ko.observable(undefined);
@@ -98,13 +99,13 @@ $(function() {
                 "upload": function(a, b) {
                     // sorts descending
                     if (b["date"] === undefined || a["date"] > b["date"]) return -1;
-                    if (a["date"] < b["date"]) return 1;
+                    if (a["date"] === undefined || a["date"] < b["date"]) return 1;
                     return 0;
                 },
                 "size": function(a, b) {
                     // sorts descending
                     if (b["size"] === undefined || a["size"] > b["size"]) return -1;
-                    if (a["size"] < b["size"]) return 1;
+                    if (a["size"] === undefined || a["size"] < b["size"]) return 1;
                     return 0;
                 }
             },
@@ -276,6 +277,20 @@ $(function() {
 
             self.allItems(files);
 
+            // Sanity check file list - see #2572
+            var nonrecursive = false;
+            _.each(files, function(file) {
+                if (file.type === "folder" && file.children === undefined) {
+                    nonrecursive = true;
+                }
+            });
+            if (nonrecursive) {
+                log.error("At least one folder doesn't have a 'children' element defined. That means the file list request " +
+                    "wasn't actually made with 'recursive=true' in the query.\n\n" +
+                    "This can happen on wrong reverse proxy configs that " +
+                    "swallow up query parameters, see https://github.com/foosel/OctoPrint/issues/2572");
+            }
+
             if (!switchToPath) {
                 var currentPath = self.currentPath();
                 if (currentPath === undefined) {
@@ -294,10 +309,7 @@ $(function() {
                 var entryElement = self.getEntryElement({path: focus.path, origin: focus.location});
                 if (entryElement) {
                     // scroll to uploaded element
-                    var entryOffset = entryElement.offsetTop;
-                    self.listElement.slimScroll({
-                        scrollTo: entryOffset + "px"
-                    });
+                    self.listElement.scrollTop(entryElement.offsetTop);
 
                     // highlight uploaded element
                     var element = $(entryElement);
@@ -321,6 +333,11 @@ $(function() {
         };
 
         self.changeFolder = function(data) {
+            if (data.children === undefined) {
+                log.error("Can't switch to folder '" + data.path + "', no children available");
+                return;
+            }
+
             self.currentPath(data.path);
             self.listHelper.updateItems(data.children);
             self.highlightCurrentFilename();
@@ -786,14 +803,16 @@ $(function() {
                 var files = $("#files");
                 if (files.hasClass("in")) {
                     files.removeClass("overflow_visible");
+                    self.filesListVisible(false);
                 } else {
                     setTimeout(function() {
                         files.addClass("overflow_visible");
+                        self.filesListVisible(true);
                     }, 100);
                 }
             });
 
-            self.listElement = $(".gcode_files");
+            self.listElement = $("#files").find(".scroll-wrapper");
 
             self.addFolderDialog = $("#add_folder_dialog");
             self.addFolderDialog.on("shown", function() {

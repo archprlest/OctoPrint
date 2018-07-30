@@ -153,7 +153,8 @@ class StorageInterface(object):
 		                        from root of base folder
 		:param function filter: a filter that matches the files that are to be returned, may be left out in which case no
 		                        filtering will take place
-		:param bool recursive:  will also step into sub folders for building the complete list if set to True
+		:param bool recursive:  will also step into sub folders for building the complete list if set to True, otherwise will only
+		                        do one step down into sub folders to be able to populate the ``children``.
 		:return: a dictionary mapping entry names to entry data that represents the whole file list
 		"""
 		raise NotImplementedError()
@@ -176,14 +177,14 @@ class StorageInterface(object):
 		Removes the folder at ``path``
 
 		:param string path:    the path of the folder to remove
-		:param bool recursive: if set to True, contained folders and files will also be removed, otherwise and error will
-		                       be raised if the folder is not empty (apart from ``.metadata.yaml``) when it's to be removed
+		:param bool recursive: if set to True, contained folders and files will also be removed, otherwise an error will
+		                       be raised if the folder is not empty (apart from any metadata files) when it's to be removed
 		"""
 		raise NotImplementedError()
 
 	def copy_folder(self, source, destination):
 		"""
-		Copys the folder ``source`` to ``destination``
+		Copies the folder ``source`` to ``destination``
 
 		:param string source: path to the source folder
 		:param string destination: path to destination
@@ -232,7 +233,7 @@ class StorageInterface(object):
 
 	def copy_file(self, source, destination):
 		"""
-		Copys the file ``source`` to ``destination``
+		Copies the file ``source`` to ``destination``
 
 		:param string source: path to the source file
 		:param string destination: path to destination
@@ -443,7 +444,7 @@ class LocalFileStorage(StorageInterface):
 	"""
 	The ``LocalFileStorage`` is a storage implementation which holds all files, folders and metadata on disk.
 
-	Metadata is managed inside ``.metadata.yaml`` files in the respective folders, indexed by the sanitized filenames
+	Metadata is managed inside ``.metadata.json`` files in the respective folders, indexed by the sanitized filenames
 	stored within the folder. Metadata access is managed through an LRU cache to minimize access overhead.
 
 	This storage type implements :func:`path_on_disk`.
@@ -564,7 +565,7 @@ class LocalFileStorage(StorageInterface):
 			path = os.path.join(self.basefolder, path)
 
 		def last_modified_for_path(p):
-			metadata = os.path.join(p, ".metadata.yaml")
+			metadata = os.path.join(p, ".metadata.json")
 			if os.path.exists(metadata):
 				return max(os.stat(p).st_mtime, os.stat(metadata).st_mtime)
 			else:
@@ -633,7 +634,7 @@ class LocalFileStorage(StorageInterface):
 
 		empty = True
 		for entry in scandir(folder_path):
-			if entry.name == ".metadata.yaml":
+			if entry.name == ".metadata.json" or entry.name == ".metadata.yaml":
 				continue
 			empty = False
 			break
@@ -1114,7 +1115,7 @@ class LocalFileStorage(StorageInterface):
 			try:
 				print_time = float(print_time)
 			except:
-				self._logger.warn("Invalid print time value found in print history for {} in {}/.metadata.yaml: {!r}".format(name, path, print_time))
+				self._logger.warn("Invalid print time value found in print history for {} in {}/.metadata.json: {!r}".format(name, path, print_time))
 				continue
 
 			if not printer_profile in former_print_times:
@@ -1277,7 +1278,7 @@ class LocalFileStorage(StorageInterface):
 		if metadata_dirty:
 			self._save_metadata(path, metadata)
 
-	def _list_folder(self, path, base="", entry_filter=None, recursive=True, **kwargs):
+	def _list_folder(self, path, base="", entry_filter=None, recursive=True, include_children=True, **kwargs):
 		if entry_filter is None:
 			entry_filter = kwargs.get("filter", None)
 
@@ -1385,8 +1386,14 @@ class LocalFileStorage(StorageInterface):
 						sub_result = self._list_folder(entry_path, base=path_in_location + "/", entry_filter=entry_filter,
 						                               recursive=recursive)
 						entry_data["children"] = sub_result
+					elif include_children:
+						sub_result = self._list_folder(entry_path, base=path_in_location + "/", entry_filter=entry_filter,
+						                               recursive=False, include_children=False)
+						entry_data["children"] = sub_result
 
 					if not entry_filter or entry_filter(entry_name, entry_data):
+						# only add folders passing the optional filter
+
 						def get_size():
 							total_size = 0
 							for element in entry_data["children"].values():
@@ -1395,7 +1402,6 @@ class LocalFileStorage(StorageInterface):
 
 							return total_size
 
-						# only add folders passing the optional filter
 						extended_entry_data = dict()
 						extended_entry_data.update(entry_data)
 						if recursive:
@@ -1512,14 +1518,16 @@ class LocalFileStorage(StorageInterface):
 			if path in self._metadata_cache:
 				return deepcopy(self._metadata_cache[path])
 
-			metadata_path = os.path.join(path, ".metadata.yaml")
+			self._migrate_metadata(path)
+
+			metadata_path = os.path.join(path, ".metadata.json")
 			if os.path.exists(metadata_path):
 				with open(metadata_path) as f:
 					try:
-						import yaml
-						metadata = yaml.safe_load(f)
+						import json
+						metadata = json.load(f)
 					except:
-						self._logger.exception("Error while reading .metadata.yaml from {path}".format(**locals()))
+						self._logger.exception("Error while reading .metadata.json from {path}".format(**locals()))
 					else:
 						if isinstance(metadata, dict):
 							self._metadata_cache[path] = deepcopy(metadata)
@@ -1528,26 +1536,62 @@ class LocalFileStorage(StorageInterface):
 
 	def _save_metadata(self, path, metadata):
 		with self._get_metadata_lock(path):
-			metadata_path = os.path.join(path, ".metadata.yaml")
+			metadata_path = os.path.join(path, ".metadata.json")
 			try:
-				import yaml
+				import json
 				with atomic_write(metadata_path) as f:
-					yaml.safe_dump(metadata, stream=f, default_flow_style=False, indent="  ", allow_unicode=True)
+					json.dump(metadata, f, indent=4, separators=(",", ": "))
 			except:
-				self._logger.exception("Error while writing .metadata.yaml to {path}".format(**locals()))
+				self._logger.exception("Error while writing .metadata.json to {path}".format(**locals()))
 			else:
 				self._metadata_cache[path] = deepcopy(metadata)
 
 	def _delete_metadata(self, path):
 		with self._get_metadata_lock(path):
-			metadata_path = os.path.join(path, ".metadata.yaml")
-			if os.path.exists(metadata_path):
-				try:
-					os.remove(metadata_path)
-				except:
-					self._logger.exception("Error while deleting .metadata.yaml from {path}".format(**locals()))
+			metadata_files = (".metadata.json", ".metadata.yaml")
+			for metadata_file in metadata_files:
+				metadata_path = os.path.join(path, metadata_file)
+				if os.path.exists(metadata_path):
+					try:
+						os.remove(metadata_path)
+					except:
+						self._logger.exception("Error while deleting {metadata_file} from {path}".format(**locals()))
 			if path in self._metadata_cache:
 				del self._metadata_cache[path]
+
+	def _migrate_metadata(self, path):
+		# we switched to json in 1.3.9 - if we still have yaml here, migrate it now
+		import yaml
+		import json
+
+		with self._get_metadata_lock(path):
+			metadata_path_yaml = os.path.join(path, ".metadata.yaml")
+			metadata_path_json = os.path.join(path, ".metadata.json")
+
+			if not os.path.exists(metadata_path_yaml):
+				# nothing to migrate
+				return
+
+			if os.path.exists(metadata_path_json):
+				# already migrated
+				# TODO 1.3.10 Remove ".metadata.yaml" files
+				return
+
+			with open(metadata_path_yaml) as f:
+				try:
+					metadata = yaml.safe_load(f)
+				except:
+					self._logger.exception("Error while reading .metadata.yaml from {path}".format(**locals()))
+					return
+
+			if not isinstance(metadata, dict):
+				# looks invalid, ignore it
+				return
+
+			with atomic_write(metadata_path_json) as f:
+				json.dump(metadata, f, indent=4, separators=(",", ": "))
+
+			# TODO 1.3.10 Remove ".metadata.yaml" files
 
 	@contextmanager
 	def _get_metadata_lock(self, path):
@@ -1560,8 +1604,9 @@ class LocalFileStorage(StorageInterface):
 			counter += 1
 			self._metadata_locks[path] = (counter, lock)
 
-			yield lock
+		yield lock
 
+		with self._metadata_lock_mutex:
 			counter = self._metadata_locks[path][0]
 			counter -= 1
 			if counter <= 0:
