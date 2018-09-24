@@ -42,7 +42,7 @@ current_render_job = None
 
 # filename formats
 _capture_format = "{prefix}-%d.jpg"
-_output_format = "{prefix}.mpg"
+_output_format = "{prefix}.mp4"
 
 # old capture format, needed to delete old left-overs from
 # versions <1.2.9
