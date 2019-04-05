@@ -169,9 +169,7 @@ Upload
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's path within its storage location
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's path within its storage location. To be removed in 1.4.0.
 
 FileAdded
    A file has been added to a storage.
@@ -253,9 +251,7 @@ MetadataAnalysisStarted
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's path within its storage location
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's path within its storage location. To be removed in 1.4.0.
 
 MetadataAnalysisFinished
    The metadata analysis of a file has finished.
@@ -269,9 +265,7 @@ MetadataAnalysisFinished
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's path within its storage location
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's path within its storage location. To be removed in 1.4.0.
 
 FileSelected
    A file has been selected for printing.
@@ -284,10 +278,8 @@ FileSelected
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``)
-        * ``filename``: the file's name
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``). To be removed in 1.4.0.
+        * ``filename``: the file's name.  To be removed in 1.4.0.
 
 FileDeselected
    No file is selected any more for printing.
@@ -325,10 +317,8 @@ PrintStarted
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``)
-        * ``filename``: the file's name
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``). To be removed in 1.4.0.
+        * ``filename``: the file's name.  To be removed in 1.4.0.
 
 PrintFailed
    A print failed.
@@ -338,13 +328,13 @@ PrintFailed
      * ``name``: the file's name
      * ``path``: the file's path within its storage location
      * ``origin``: the origin storage location of the file, either ``local`` or ``sdcard``
+     * ``time``: the elapsed time of the print when it failed, in seconds (float)
+     * ``reason``: the reason the print failed, either ``cancelled`` or ``error``
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``)
-        * ``filename``: the file's name
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``). To be removed in 1.4.0.
+        * ``filename``: the file's name.  To be removed in 1.4.0.
 
 PrintDone
    A print completed successfully.
@@ -358,10 +348,8 @@ PrintDone
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``)
-        * ``filename``: the file's name
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``). To be removed in 1.4.0.
+        * ``filename``: the file's name.  To be removed in 1.4.0.
 
 PrintCancelling
    The print is about to be cancelled.
@@ -395,10 +383,8 @@ PrintCancelled
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``)
-        * ``filename``: the file's name
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``). To be removed in 1.4.0.
+        * ``filename``: the file's name. To be removed in 1.4.0.
 
 PrintPaused
    The print has been paused.
@@ -422,10 +408,8 @@ PrintPaused
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``)
-        * ``filename``: the file's name
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``). To be removed in 1.4.0.
+        * ``filename``: the file's name. To be removed in 1.4.0.
 
 PrintResumed
    The print has been resumed.
@@ -438,10 +422,8 @@ PrintResumed
 
    .. deprecated:: 1.3.0
 
-        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``)
-        * ``filename``: the file's name
-
-      Still available for reasons of backwards compatibility. Will be removed with 1.4.0.
+        * ``file``: the file's full path on disk (``local``) or within its storage (``sdcard``). To be removed in 1.4.0.
+        * ``filename``: the file's name. To be removed in 1.4.0.
 
 GCODE processing
 ----------------
