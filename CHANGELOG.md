@@ -1,6 +1,6 @@
 # OctoPrint Changelog
 
-## 1.3.9 (2018-07-25)
+## 1.3.9.1 (2018-09-24)
 
 ### Still running OctoPrint 1.3.6? Heads-up!
 
